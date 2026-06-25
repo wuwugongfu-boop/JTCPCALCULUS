@@ -174,7 +174,7 @@
       </div>
     </div>
     <div class="topbtns">
-      <span id="syncState" style="font-size:12px;color:var(--muted)"><span class="sync-dot" id="dot"></span>單價未連線</span>
+      <span id="syncState" style="font-size:12px;color:var(--muted)"><span class="sync-dot" id="dot"></span><span id="syncText">使用本機單價</span></span>
       <button onclick="openAdmin()">⚙ 老闆後台</button>
     </div>
   </header>
@@ -517,19 +517,24 @@ const ADMIN_PW = "daya2024";   // 管理密碼（老闆可改）
 let P = {...DEFAULT_PRICES};
 const LAST = {single:null, book:null};   // 最新報價快照（複製/列印用）
 
+// 寫死的雲端後台網址（業務開檔即自動連線，不必手動設定）
+const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbwO4L5cSoxYUQRnUbTNVlEI6baQyzThe1tdZbaV7iczHhGBfJ3IMvTLt79iVn4Lij-7/exec";
+
 /* ---------- 載入 / 儲存 ---------- */
 function loadLocal(){
   try{
     const raw = localStorage.getItem("jc_prices");
     if(raw) P = {...DEFAULT_PRICES, ...JSON.parse(raw)};
-    const url = localStorage.getItem("jc_gas_url")||"";
+    // 優先用本機存過的網址；沒有就用寫死的預設網址
+    const url = localStorage.getItem("jc_gas_url") || DEFAULT_GAS_URL;
     document.getElementById("gasUrl").value = url;
     return url;
-  }catch(e){return ""}
+  }catch(e){return DEFAULT_GAS_URL}
 }
 function saveLocal(){
   localStorage.setItem("jc_prices", JSON.stringify(P));
-  localStorage.setItem("jc_gas_url", document.getElementById("gasUrl").value.trim());
+  const u = document.getElementById("gasUrl").value.trim() || DEFAULT_GAS_URL;
+  localStorage.setItem("jc_gas_url", u);
 }
 // 用 JSONP 讀取（繞過 CORS，不會卡住），8 秒逾時
 function jsonpGet(url, timeout=8000){
@@ -550,14 +555,20 @@ function jsonpGet(url, timeout=8000){
 async function pullFromSheet(url){
   if(!url) return null;
   setSync("loading");
-  const data = await jsonpGet(url+"?action=get");
+  let data=null;
+  try{
+    data = await jsonpGet(url+"?action=get", 6000);
+  }catch(e){ data=null; }
   if(data && typeof data==="object" && !data.error){
     P = {...DEFAULT_PRICES, ...data};
     localStorage.setItem("jc_prices", JSON.stringify(P));
     setSync("ok"); recalc();
     return data;
   }
-  setSync("err"); return null;
+  // 讀不到雲端：若本機已有單價就視為「已連線(用本機值)」，否則標未連線
+  const hasLocal = !!localStorage.getItem("jc_prices");
+  setSync(hasLocal ? "ok" : "idle");
+  return null;
 }
 async function pushToSheet(url){
   // Apps Script 不回 CORS 標頭，用 no-cors 送出（送得到、會寫入，但讀不到回應）
@@ -573,12 +584,13 @@ async function pushToSheet(url){
   return check;
 }
 function setSync(state){
-  const dot=document.getElementById("dot"), txt=document.getElementById("syncState");
+  const dot=document.getElementById("dot"), txt=document.getElementById("syncText");
+  if(!dot||!txt) return;
   dot.className="sync-dot";
-  if(state==="ok"){dot.classList.add("on"); txt.innerHTML='<span class="sync-dot on"></span>單價已同步';}
-  else if(state==="err"){dot.classList.add("err"); txt.innerHTML='<span class="sync-dot err"></span>同步失敗(用本機值)';}
-  else if(state==="loading"){txt.innerHTML='<span class="sync-dot"></span>同步中…';}
-  else txt.innerHTML='<span class="sync-dot"></span>單價未連線';
+  if(state==="ok"){ dot.classList.add("on"); txt.textContent="單價已同步"; }
+  else if(state==="err"){ dot.classList.add("err"); txt.textContent="同步失敗(用本機值)"; }
+  else if(state==="loading"){ txt.textContent="同步中…"; }
+  else { txt.textContent="使用本機單價"; }
 }
 
 /* ============================================================
@@ -938,7 +950,16 @@ document.addEventListener("change", e=>{
 window.addEventListener("DOMContentLoaded", async ()=>{
   const url = loadLocal();
   recalc();
-  if(url) await pullFromSheet(url);
+  // 保底：萬一讀取卡住，6.5 秒後強制收尾，狀態燈不會永遠停在「同步中」
+  const guard = setTimeout(()=>{
+    const txt=document.getElementById("syncText");
+    if(txt && txt.textContent.includes("同步中")){
+      setSync(localStorage.getItem("jc_prices") ? "ok" : "idle");
+    }
+  }, 6500);
+  if(url){ await pullFromSheet(url); }
+  else { setSync("idle"); }
+  clearTimeout(guard);
 });
 </script>
 </body>
